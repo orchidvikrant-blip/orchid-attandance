@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { getAllEmployees, addEmployee, deleteEmployee } from '../services/employeeService';
 import type { Employee } from '../services/employeeService';
 import toast from 'react-hot-toast';
+import { computeFaceDescriptor } from '../utils/faceDescriptor';
 
 const DEPARTMENTS = ['HR', 'IT', 'Finance', 'Operations', 'Sales', 'Admin', 'Management'];
 
@@ -90,11 +91,22 @@ export default function Employees() {
     if (!photoBase64) { toast.error('Photo required'); return; }
     setSaving(true);
     try {
+      const loadingId = 'face-desc';
+      toast.loading('Detecting face & computing descriptor...', { id: loadingId });
+      const descriptor = await computeFaceDescriptor(photoPreview);
+      toast.dismiss(loadingId);
+
+      if (descriptor.length === 0) {
+        toast.error('No face detected. Use a clear front-facing photo.');
+        setSaving(false);
+        return;
+      }
+
       await addEmployee(
-        { ...form, faceDescriptor: [] },
+        { ...form, faceDescriptor: descriptor },
         photoBase64
       );
-      toast.success(`${form.name} registered successfully!`);
+      toast.success(`${form.name} registered! Face descriptor saved (${descriptor.length} values).`);
       setShowForm(false);
       setForm(emptyForm);
       setPhotoBase64('');

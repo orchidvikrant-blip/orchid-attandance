@@ -11,10 +11,8 @@ import {
   getAllEmployees, markAttendance, getLastAttendanceType,
 } from '../services/attendanceService';
 import type { Employee } from '../services/attendanceService';
-import * as tf from '@tensorflow/tfjs';
-
 const { width: W } = Dimensions.get('window');
-const SCAN_INTERVAL = 3000;
+const SCAN_INTERVAL = 2000;
 
 // Brand colors from Orchid logo
 const C = {
@@ -114,11 +112,10 @@ export default function KioskScreen() {
       if (!tensor) { locked.current = false; setStatus('idle'); return; }
 
       const faces = await detectFaces(tensor);
-      tf.dispose(tensor);
+      if (faces.length === 0) { tensor.dispose(); locked.current = false; setStatus('idle'); return; }
 
-      if (faces.length === 0) { locked.current = false; setStatus('idle'); return; }
-
-      const match = matchFace(faces[0], employees, photo.width ?? 640, photo.height ?? 480);
+      const match = await matchFace(tensor, faces[0], employees);
+      tensor.dispose();
       if (!match) { showResult('unknown'); return; }
 
       const lastType = await getLastAttendanceType(match.employee.id);
