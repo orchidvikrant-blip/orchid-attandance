@@ -160,7 +160,7 @@ export default function KioskScreen() {
   useEffect(() => {
     (async () => {
       await requestPermission();
-      setInitMsg('Loading AI models...');
+      setInitMsg('Downloading AI models... (first time only, ~7MB)');
       await initTensorFlow();
       setInitMsg('');
       const emps = await getAllEmployees();
