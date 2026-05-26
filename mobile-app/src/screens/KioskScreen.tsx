@@ -5,16 +5,18 @@ import {
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
-  initTensorFlow, isTfReady, base64ToTensor, detectFaces, matchFace,
+  initTensorFlow, isTfReady, base64ToTensor, detectFace, matchDescriptor,
 } from '../services/faceRecognition';
 import {
   getAllEmployees, markAttendance, getLastAttendanceType,
 } from '../services/attendanceService';
 import type { Employee } from '../services/attendanceService';
+
 const { width: W } = Dimensions.get('window');
+const CAM_W = W * 0.70;
+const CAM_H = W * 0.86;
 const SCAN_INTERVAL = 2000;
 
-// Brand colors from Orchid logo
 const C = {
   bg:      '#071022',
   card:    '#0a1628',
@@ -29,15 +31,23 @@ const C = {
 
 type Status = 'idle' | 'scanning' | 'marked' | 'unknown';
 
+interface EyePos {
+  left:  [number, number];
+  right: [number, number];
+  imgW:  number;
+  imgH:  number;
+}
+
 export default function KioskScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
-  const [status, setStatus]       = useState<Status>('idle');
-  const [employee, setEmployee]   = useState<Employee | null>(null);
-  const [attType, setAttType]     = useState<'IN' | 'OUT'>('IN');
-  const [timeStr, setTimeStr]     = useState('');
-  const [employees, setEmployees] = useState<Employee[]>([]);
-  const [initMsg, setInitMsg]     = useState('Initializing...');
+  const [status, setStatus]         = useState<Status>('idle');
+  const [employee, setEmployee]     = useState<Employee | null>(null);
+  const [attType, setAttType]       = useState<'IN' | 'OUT'>('IN');
+  const [timeStr, setTimeStr]       = useState('');
+  const [employees, setEmployees]   = useState<Employee[]>([]);
+  const [initMsg, setInitMsg]       = useState('Initializing...');
+  const [eyePos, setEyePos]         = useState<EyePos | null>(null);
   const locked    = useRef(false);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim  = useRef(new Animated.Value(0)).current;
@@ -46,7 +56,7 @@ export default function KioskScreen() {
   useEffect(() => {
     (async () => {
       await requestPermission();
-      setInitMsg('Loading AI model...');
+      setInitMsg('Loading AI models...');
       await initTensorFlow();
       setInitMsg('');
       const emps = await getAllEmployees();
@@ -54,7 +64,6 @@ export default function KioskScreen() {
     })();
   }, []);
 
-  // Gold border pulse when idle/scanning
   useEffect(() => {
     if (status === 'idle' || status === 'scanning') {
       Animated.loop(
@@ -73,6 +82,7 @@ export default function KioskScreen() {
     s: Status, emp?: Employee, type?: 'IN' | 'OUT', time?: string
   ) => {
     setStatus(s);
+    setEyePos(null);
     if (emp)  setEmployee(emp);
     if (type) setAttType(type);
     if (time) setTimeStr(time);
@@ -101,22 +111,32 @@ export default function KioskScreen() {
 
     try {
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.6,
-        base64: true,
-        exif: false,
+        quality: 0.6, base64: true, exif: false,
       });
       if (!photo?.base64) { locked.current = false; return; }
 
       const tensor = await base64ToTensor(photo.base64);
       if (!tensor) { locked.current = false; return; }
 
-      const faces = await detectFaces(tensor);
-      if (faces.length === 0) { tensor.dispose(); locked.current = false; return; }
-
-      // Face mila — ab scanning dikhao
-      setStatus('scanning');
-      const match = await matchFace(tensor, faces[0], employees);
+      const detection = await detectFace(tensor);
       tensor.dispose();
+
+      if (!detection) {
+        // No face — stay idle silently
+        locked.current = false;
+        return;
+      }
+
+      // Face detected — show eye dots + scanning indicator
+      setStatus('scanning');
+      setEyePos({
+        left:  detection.leftEye,
+        right: detection.rightEye,
+        imgW:  photo.width  ?? 640,
+        imgH:  photo.height ?? 480,
+      });
+
+      const match = matchDescriptor(detection.descriptor, employees);
       if (!match) { showResult('unknown'); return; }
 
       const lastType = await getLastAttendanceType(match.employee.id);
@@ -128,6 +148,7 @@ export default function KioskScreen() {
       console.error(err);
       locked.current = false;
       setStatus('idle');
+      setEyePos(null);
     }
   }, [employees, showResult]);
 
@@ -160,13 +181,9 @@ export default function KioskScreen() {
     <View style={s.root}>
       <StatusBar hidden />
 
-      {/* Header with logo */}
+      {/* Header */}
       <View style={s.header}>
-        <Image
-          source={require('../../assets/logo.png')}
-          style={s.logo}
-          resizeMode="contain"
-        />
+        <Image source={require('../../assets/logo.png')} style={s.logo} resizeMode="contain" />
         <View style={s.headerDivider} />
         <Text style={s.headerDate}>{today}</Text>
       </View>
@@ -175,13 +192,28 @@ export default function KioskScreen() {
       <View style={s.camWrap}>
         <Animated.View style={[s.camBorder, { borderColor, transform: [{ scale: pulseAnim }] }]}>
           <CameraView ref={cameraRef} style={s.cam} facing="front" />
+
+          {/* Eye dots — shown when face detected */}
+          {eyePos && (['left', 'right'] as const).map(side => {
+            const [ex, ey] = eyePos[side];
+            // Mirror x because front camera preview is horizontally flipped
+            const dx = CAM_W - (ex / eyePos.imgW * CAM_W);
+            const dy = ey / eyePos.imgH * CAM_H;
+            return (
+              <View
+                key={side}
+                style={[s.eyeDot, { left: dx - 6, top: dy - 6 }]}
+              />
+            );
+          })}
+
           {/* Corner marks */}
           {(['tl','tr','bl','br'] as const).map(p => (
             <View key={p} style={[s.corner, s[p], { borderColor }]} />
           ))}
         </Animated.View>
 
-        {/* Smile message below camera */}
+        {/* Below camera label */}
         <View style={s.smileWrap}>
           {status === 'scanning' ? (
             <View style={s.scanLabel}>
@@ -193,7 +225,7 @@ export default function KioskScreen() {
         </View>
       </View>
 
-      {/* Status / Result overlay */}
+      {/* Status / Result */}
       <View style={s.statusWrap}>
         {initMsg ? (
           <Text style={{ color: C.gold, fontSize: 14, letterSpacing: 0.5 }}>{initMsg}</Text>
@@ -214,11 +246,9 @@ export default function KioskScreen() {
           ]}>
             {status === 'marked' && employee ? (
               <>
-                {/* Thank You message */}
                 <Text style={s.thankYou}>🙏  Thank You!</Text>
                 <Text style={s.empName}>{employee.name}</Text>
                 <Text style={s.empDept}>{employee.department}</Text>
-
                 <View style={[s.typeBadge, {
                   backgroundColor: attType === 'IN' ? '#166534' : '#7c3200',
                   borderColor: attType === 'IN' ? C.green : C.gold,
@@ -227,7 +257,6 @@ export default function KioskScreen() {
                     {attType === 'IN' ? '✅  CHECKED IN' : '👋  CHECKED OUT'}
                   </Text>
                 </View>
-
                 <Text style={s.timeText}>{timeStr}</Text>
               </>
             ) : (
@@ -246,8 +275,8 @@ export default function KioskScreen() {
         <View style={s.footerDot} />
         <Text style={s.footerText}>
           {isTfReady()
-            ? `${employees.length} employees registered  •  System Active`
-            : 'Loading AI model...'}
+            ? `${employees.length} employees  •  face-api.js  •  System Active`
+            : 'Loading AI models...'}
         </Text>
       </View>
     </View>
@@ -257,22 +286,28 @@ export default function KioskScreen() {
 const s = StyleSheet.create({
   root:   { flex: 1, backgroundColor: C.bg },
 
-  // Header
   header: {
     paddingTop: 36, paddingBottom: 14, alignItems: 'center',
     backgroundColor: C.card, borderBottomWidth: 1, borderBottomColor: C.border,
   },
-  logo:   { width: W * 0.38, height: 52 },
+  logo:          { width: W * 0.38, height: 52 },
   headerDivider: { width: 40, height: 2, backgroundColor: C.gold, marginTop: 10, borderRadius: 1 },
-  headerDate: { color: C.textSub, fontSize: 12, marginTop: 8, letterSpacing: 0.3 },
+  headerDate:    { color: C.textSub, fontSize: 12, marginTop: 8, letterSpacing: 0.3 },
 
-  // Camera
   camWrap:   { flex: 1, justifyContent: 'center', alignItems: 'center' },
   camBorder: {
-    width: W * 0.70, height: W * 0.86,
+    width: CAM_W, height: CAM_H,
     borderRadius: 20, borderWidth: 2.5, overflow: 'hidden',
   },
   cam: { flex: 1 },
+
+  eyeDot: {
+    position: 'absolute',
+    width: 12, height: 12, borderRadius: 6,
+    backgroundColor: '#00ff88',
+    borderWidth: 2, borderColor: '#ffffff',
+    opacity: 0.9,
+  },
 
   corner:  { position: 'absolute', width: 20, height: 20, borderWidth: 3 },
   tl: { top: -1, left: -1,   borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 18 },
@@ -280,11 +315,11 @@ const s = StyleSheet.create({
   bl: { bottom: -1, left: -1,  borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 18 },
   br: { bottom: -1, right: -1, borderLeftWidth: 0,  borderTopWidth: 0, borderBottomRightRadius: 18 },
 
-  scanLabel: { position: 'absolute', bottom: 16, alignSelf: 'center',
-    backgroundColor: '#e8a82033', paddingHorizontal: 20, paddingVertical: 6, borderRadius: 20 },
-  scanText:  { color: C.gold, fontSize: 14, fontWeight: '600' },
+  smileWrap:  { marginTop: 14, alignItems: 'center' },
+  smileText:  { color: C.gold, fontSize: 13, fontWeight: '500', letterSpacing: 0.3 },
+  scanLabel:  { backgroundColor: '#e8a82033', paddingHorizontal: 20, paddingVertical: 6, borderRadius: 20 },
+  scanText:   { color: C.gold, fontSize: 14, fontWeight: '600' },
 
-  // Status
   statusWrap: { height: 150, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 },
   idleMain:   { color: '#c8d8f0', fontSize: 16, fontWeight: '500', textAlign: 'center' },
   idleSub:    { color: C.textSub, fontSize: 12, marginTop: 6 },
@@ -306,7 +341,6 @@ const s = StyleSheet.create({
   unknownText: { color: '#fca5a5', fontSize: 17, fontWeight: '700' },
   unknownSub:  { color: '#4a6fa5', fontSize: 12, marginTop: 6 },
 
-  // Footer
   footer: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     paddingVertical: 11, backgroundColor: C.card,
@@ -314,7 +348,4 @@ const s = StyleSheet.create({
   },
   footerDot:  { width: 7, height: 7, borderRadius: 4, backgroundColor: C.green },
   footerText: { color: C.textSub, fontSize: 11, letterSpacing: 0.3 },
-
-  smileWrap:  { marginTop: 14, alignItems: 'center' },
-  smileText:  { color: C.gold, fontSize: 13, fontWeight: '500', letterSpacing: 0.3 },
 });

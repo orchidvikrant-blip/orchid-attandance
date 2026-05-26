@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -rf mobile-app/.git)",
+      "Bash(git rm *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Initial commit: Orchid Attendance App *)",
+      "Bash(git commit *)",
+      "Bash(git branch *)",
+      "Bash(git push *)",
+      "Bash(git remote *)"
+    ]
+  }
+}
