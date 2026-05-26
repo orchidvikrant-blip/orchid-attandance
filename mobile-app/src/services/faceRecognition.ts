@@ -1,24 +1,67 @@
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-react-native';
 import * as faceapi from '@vladmandic/face-api';
+import * as FileSystem from 'expo-file-system';
 import { decode as decodeBase64 } from 'base64-arraybuffer';
 import type { Employee } from './attendanceService';
 
-// Models hosted on jsDelivr CDN — downloaded once at first launch
-const MODEL_URL =
-  'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
+const CDN = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/';
+const CACHE_DIR = `${FileSystem.documentDirectory}facemodels/`;
 
 let ready = false;
+let fetchPatched = false;
 
-export async function initTensorFlow(): Promise<void> {
+// Intercept CDN fetch calls → serve from local cache (download if needed)
+async function patchFetch() {
+  if (fetchPatched) return;
+  fetchPatched = true;
+  await FileSystem.makeDirectoryAsync(CACHE_DIR, { intermediates: true });
+
+  const _orig = global.fetch;
+  global.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input.toString();
+    if (!url.startsWith(CDN)) return _orig(input, init);
+
+    const filename = url.split('/').pop()!;
+    const local    = CACHE_DIR + filename;
+    const info     = await FileSystem.getInfoAsync(local);
+
+    if (!info.exists) {
+      // First time: download from CDN and cache locally
+      await FileSystem.downloadAsync(url, local);
+    }
+
+    // Serve from local file
+    if (filename.endsWith('.json')) {
+      const text = await FileSystem.readAsStringAsync(local);
+      return new Response(text, { headers: { 'Content-Type': 'application/json' } });
+    } else {
+      const b64 = await FileSystem.readAsStringAsync(local, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      return new Response(decodeBase64(b64), {
+        headers: { 'Content-Type': 'application/octet-stream' },
+      });
+    }
+  };
+}
+
+export type ProgressFn = (msg: string) => void;
+
+export async function initTensorFlow(onProgress?: ProgressFn): Promise<void> {
   if (ready) return;
   await tf.ready();
-  // Tiny models — smaller, faster, good enough for kiosk
-  await Promise.all([
-    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-    faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL),
-    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-  ]);
+  await patchFetch();
+
+  onProgress?.('Loading face detector...');
+  await faceapi.nets.tinyFaceDetector.loadFromUri(CDN);
+
+  onProgress?.('Loading landmark model...');
+  await faceapi.nets.faceLandmark68TinyNet.loadFromUri(CDN);
+
+  onProgress?.('Loading recognition model...');
+  await faceapi.nets.faceRecognitionNet.loadFromUri(CDN);
+
   ready = true;
 }
 
@@ -41,13 +84,11 @@ export async function base64ToTensor(base64: string): Promise<tf.Tensor3D | null
 }
 
 export interface FaceDetection {
-  descriptor: Float32Array;          // 128-dim face embedding
-  leftEye:  [number, number];        // (x, y) in photo coords
+  descriptor: Float32Array;
+  leftEye:  [number, number];
   rightEye: [number, number];
 }
 
-// Detect single face + 68 landmarks + 128-dim descriptor
-// Returns null if no face found
 export async function detectFace(tensor: tf.Tensor3D): Promise<FaceDetection | null> {
   try {
     const det = await faceapi
@@ -60,7 +101,6 @@ export async function detectFace(tensor: tf.Tensor3D): Promise<FaceDetection | n
 
     if (!det) return null;
 
-    // Average the 6 eye-corner points for each eye
     const avgPt = (pts: faceapi.Point[]): [number, number] => [
       pts.reduce((s, p) => s + p.x, 0) / pts.length,
       pts.reduce((s, p) => s + p.y, 0) / pts.length,
@@ -77,16 +117,12 @@ export async function detectFace(tensor: tf.Tensor3D): Promise<FaceDetection | n
   }
 }
 
-// Euclidean distance between two 128-dim descriptors
 function euclidean(a: Float32Array | number[], b: number[]): number {
   let sum = 0;
-  for (let i = 0; i < Math.min(a.length, b.length); i++) {
-    sum += (a[i] - b[i]) ** 2;
-  }
+  for (let i = 0; i < Math.min(a.length, b.length); i++) sum += (a[i] - b[i]) ** 2;
   return Math.sqrt(sum);
 }
 
-// face-api.js standard: dist < 0.6 = same person
 const THRESHOLD = 0.6;
 
 export function matchDescriptor(

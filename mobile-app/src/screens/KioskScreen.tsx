@@ -5,6 +5,7 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
   base64ToTensor, detectFace, initTensorFlow, isTfReady, matchDescriptor,
+  type ProgressFn,
 } from '../services/faceRecognition';
 import { getAllEmployees, getLastAttendanceType, markAttendance } from '../services/attendanceService';
 import type { Employee } from '../services/attendanceService';
@@ -160,8 +161,9 @@ export default function KioskScreen() {
   useEffect(() => {
     (async () => {
       await requestPermission();
-      setInitMsg('Downloading AI models... (first time only, ~7MB)');
-      await initTensorFlow();
+      const onProgress: ProgressFn = (msg) => setInitMsg(msg);
+      setInitMsg('Starting...');
+      await initTensorFlow(onProgress);
       setInitMsg('');
       const emps = await getAllEmployees();
       employeesRef.current = emps;
