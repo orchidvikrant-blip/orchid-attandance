@@ -1,0 +1,40 @@
+{
+  "expo": {
+    "name": "Orchid Attendance",
+    "slug": "orchid-attendance",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#071022"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.orchid.attendance"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#071022",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "package": "com.orchid.attendance",
+      "permissions": [
+        "android.permission.CAMERA"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Orchid Attendance needs camera access to scan faces for attendance."
+        }
+      ]
+    ],
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
