@@ -3,6 +3,7 @@ import {
   Animated, Dimensions, Image, StatusBar, StyleSheet, Text, View,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import * as Speech from 'expo-speech';
 import {
   base64ToTensor, detectFace, initTensorFlow, isTfReady, matchDescriptor,
   type ProgressFn,
@@ -134,7 +135,8 @@ export default function KioskScreen() {
       const match = matchDescriptor(detection.descriptor, employeesRef.current);
 
       if (!match) {
-        showResult('unknown'); // locked released inside showResult after 3s
+        Speech.speak('Please try again', { language: 'en-IN', rate: 0.9 });
+        showResult('unknown');
         return;
       }
 
@@ -143,6 +145,10 @@ export default function KioskScreen() {
       const nextType: 'IN' | 'OUT' = lastType === 'IN' ? 'OUT' : 'IN';
       await markAttendance(match.employee, nextType);
       const t = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+      Speech.speak(
+        `Thank you ${match.employee.name}, checked ${nextType === 'IN' ? 'in' : 'out'}`,
+        { language: 'en-IN', rate: 0.9 }
+      );
       showResult('marked', match.employee, nextType, t);
 
     } catch (e) {
