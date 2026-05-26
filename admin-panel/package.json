@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",
-    "@vladmandic/face-api": "^3.4.0",
+    "@vladmandic/face-api": "^1.7.15",
     "date-fns": "^4.3.0",
     "firebase": "^12.13.0",
     "jspdf": "^4.2.1",

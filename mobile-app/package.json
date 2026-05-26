@@ -6,7 +6,7 @@
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-react-native": "^1.0.0",
-    "@vladmandic/face-api": "^3.4.0",
+    "@vladmandic/face-api": "^1.7.15",
     "base64-arraybuffer": "^1.0.2",
     "expo": "~56.0.4",
     "expo-asset": "^56.0.14",
