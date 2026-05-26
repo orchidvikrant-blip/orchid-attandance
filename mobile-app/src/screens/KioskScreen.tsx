@@ -98,7 +98,6 @@ export default function KioskScreen() {
   const scanOnce = useCallback(async () => {
     if (!cameraRef.current || locked.current || !isTfReady()) return;
     locked.current = true;
-    setStatus('scanning');
 
     try {
       const photo = await cameraRef.current.takePictureAsync({
@@ -106,14 +105,16 @@ export default function KioskScreen() {
         base64: true,
         exif: false,
       });
-      if (!photo?.base64) { locked.current = false; setStatus('idle'); return; }
+      if (!photo?.base64) { locked.current = false; return; }
 
       const tensor = await base64ToTensor(photo.base64);
-      if (!tensor) { locked.current = false; setStatus('idle'); return; }
+      if (!tensor) { locked.current = false; return; }
 
       const faces = await detectFaces(tensor);
-      if (faces.length === 0) { tensor.dispose(); locked.current = false; setStatus('idle'); return; }
+      if (faces.length === 0) { tensor.dispose(); locked.current = false; return; }
 
+      // Face mila — ab scanning dikhao
+      setStatus('scanning');
       const match = await matchFace(tensor, faces[0], employees);
       tensor.dispose();
       if (!match) { showResult('unknown'); return; }
@@ -132,7 +133,9 @@ export default function KioskScreen() {
 
   useEffect(() => {
     if (!isTfReady()) return;
-    const id = setInterval(() => { if (status === 'idle') scanOnce(); }, SCAN_INTERVAL);
+    const id = setInterval(() => {
+      if (status === 'idle' || status === 'scanning') scanOnce();
+    }, SCAN_INTERVAL);
     return () => clearInterval(id);
   }, [status, scanOnce]);
 
