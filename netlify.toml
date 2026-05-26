@@ -1,7 +1,10 @@
 [build]
   base    = "admin-panel"
-  command = "npm run build"
+  command = "npm install && npm run build"
   publish = "admin-panel/dist"
+
+[build.environment]
+  NODE_VERSION = "20"
 
 [[redirects]]
   from   = "/*"
