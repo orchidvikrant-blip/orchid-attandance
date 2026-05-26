@@ -22,7 +22,8 @@
       },
       "package": "com.orchid.attendance",
       "permissions": [
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
       ]
     },
     "plugins": [
@@ -35,6 +36,11 @@
     ],
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "2a4c0077-415e-46dc-9efc-50c5676de983"
+      }
     }
   }
 }
