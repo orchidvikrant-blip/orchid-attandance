@@ -2,65 +2,76 @@ import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-react-native';
 import * as faceapi from '@vladmandic/face-api';
 import * as FileSystem from 'expo-file-system';
+import { Asset } from 'expo-asset';
 import { decode as decodeBase64 } from 'base64-arraybuffer';
 import type { Employee } from './attendanceService';
 
-const CDN = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights/';
-const CACHE_DIR = `${FileSystem.documentDirectory}facemodels/`;
+// ─── Bundled asset references (compiled into APK — no internet needed) ────────
+const ASSETS = {
+  tinyFace: {
+    manifest: require('../../assets/models/tiny_face_detector_model-weights_manifest.json'),
+    shards:   [require('../../assets/models/tiny_face_detector_model-shard1.bin')],
+  },
+  landmark: {
+    manifest: require('../../assets/models/face_landmark_68_tiny_model-weights_manifest.json'),
+    shards:   [require('../../assets/models/face_landmark_68_tiny_model-shard1.bin')],
+  },
+  recognition: {
+    manifest: require('../../assets/models/face_recognition_model-weights_manifest.json'),
+    shards:   [
+      require('../../assets/models/face_recognition_model-shard1.bin'),
+      require('../../assets/models/face_recognition_model-shard2.bin'),
+    ],
+  },
+};
 
-let ready = false;
-let fetchPatched = false;
-
-// Intercept CDN fetch calls → serve from local cache (download if needed)
-async function patchFetch() {
-  if (fetchPatched) return;
-  fetchPatched = true;
-  await FileSystem.makeDirectoryAsync(CACHE_DIR, { intermediates: true });
-
-  const _orig = global.fetch;
-  global.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = input.toString();
-    if (!url.startsWith(CDN)) return _orig(input, init);
-
-    const filename = url.split('/').pop()!;
-    const local    = CACHE_DIR + filename;
-    const info     = await FileSystem.getInfoAsync(local);
-
-    if (!info.exists) {
-      // First time: download from CDN and cache locally
-      await FileSystem.downloadAsync(url, local);
-    }
-
-    // Serve from local file
-    if (filename.endsWith('.json')) {
-      const text = await FileSystem.readAsStringAsync(local);
-      return new Response(text, { headers: { 'Content-Type': 'application/json' } });
-    } else {
-      const b64 = await FileSystem.readAsStringAsync(local, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      return new Response(decodeBase64(b64), {
-        headers: { 'Content-Type': 'application/octet-stream' },
-      });
-    }
-  };
+// Read a bundled asset as an ArrayBuffer
+async function assetToBuffer(module: number): Promise<ArrayBuffer> {
+  const asset = await Asset.fromModule(module).downloadAsync();
+  const b64   = await FileSystem.readAsStringAsync(asset.localUri!, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+  return decodeBase64(b64);
 }
 
+// Load a face-api.js network from bundled assets using tf.io
+async function loadNet(net: any, manifestObj: any, shardModules: number[]) {
+  // manifest is already parsed JSON (required directly)
+  const weightSpecs: tf.io.WeightsManifestEntry[] =
+    (manifestObj as any[]).flatMap((g: any) => g.weights);
+
+  const buffers = await Promise.all(shardModules.map(assetToBuffer));
+
+  // Concatenate all shard buffers
+  const totalBytes = buffers.reduce((s, b) => s + b.byteLength, 0);
+  const combined   = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const buf of buffers) {
+    combined.set(new Uint8Array(buf), offset);
+    offset += buf.byteLength;
+  }
+
+  const weightMap = tf.io.decodeWeights(combined.buffer, weightSpecs);
+  await net.load(weightMap);
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+let ready = false;
 export type ProgressFn = (msg: string) => void;
 
 export async function initTensorFlow(onProgress?: ProgressFn): Promise<void> {
   if (ready) return;
   await tf.ready();
-  await patchFetch();
 
   onProgress?.('Loading face detector...');
-  await faceapi.nets.tinyFaceDetector.loadFromUri(CDN);
+  await loadNet(faceapi.nets.tinyFaceDetector, ASSETS.tinyFace.manifest, ASSETS.tinyFace.shards);
 
   onProgress?.('Loading landmark model...');
-  await faceapi.nets.faceLandmark68TinyNet.loadFromUri(CDN);
+  await loadNet(faceapi.nets.faceLandmark68TinyNet, ASSETS.landmark.manifest, ASSETS.landmark.shards);
 
   onProgress?.('Loading recognition model...');
-  await faceapi.nets.faceRecognitionNet.loadFromUri(CDN);
+  await loadNet(faceapi.nets.faceRecognitionNet, ASSETS.recognition.manifest, ASSETS.recognition.shards);
 
   ready = true;
 }
@@ -85,8 +96,8 @@ export async function base64ToTensor(base64: string): Promise<tf.Tensor3D | null
 
 export interface FaceDetection {
   descriptor: Float32Array;
-  leftEye:  [number, number];
-  rightEye: [number, number];
+  leftEye:    [number, number];
+  rightEye:   [number, number];
 }
 
 export async function detectFace(tensor: tf.Tensor3D): Promise<FaceDetection | null> {
@@ -108,8 +119,8 @@ export async function detectFace(tensor: tf.Tensor3D): Promise<FaceDetection | n
 
     return {
       descriptor: det.descriptor,
-      leftEye:  avgPt(det.landmarks.getLeftEye()),
-      rightEye: avgPt(det.landmarks.getRightEye()),
+      leftEye:    avgPt(det.landmarks.getLeftEye()),
+      rightEye:   avgPt(det.landmarks.getRightEye()),
     };
   } catch (e) {
     console.warn('Face detection error:', e);
