@@ -16,12 +16,20 @@ export async function registerFaceWithLuxand(name: string, photoDataUrl: string)
   }
   const { uuid } = await createRes.json() as { uuid: string };
 
-  // 2. Upload photo (strip data: prefix)
+  // 2. Upload photo as multipart/form-data
   const base64 = photoDataUrl.includes(',') ? photoDataUrl.split(',')[1] : photoDataUrl;
+  const byteStr = atob(base64);
+  const ab = new ArrayBuffer(byteStr.length);
+  const ia = new Uint8Array(ab);
+  for (let i = 0; i < byteStr.length; i++) ia[i] = byteStr.charCodeAt(i);
+  const blob = new Blob([ab], { type: 'image/jpeg' });
+  const formData = new FormData();
+  formData.append('photo', blob, 'photo.jpg');
+
   const photoRes = await fetch(`${LUXAND_API}/person/${uuid}/photo`, {
     method: 'POST',
-    headers: { token: LUXAND_TOKEN, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ photo: base64 }),
+    headers: { token: LUXAND_TOKEN }, // no Content-Type — browser sets multipart boundary
+    body: formData,
   });
   if (!photoRes.ok) {
     // Clean up orphan person
