@@ -16,8 +16,7 @@ export interface Employee {
   name: string;
   employeeId: string;
   department: string;
-  luxandPersonId?: string;
-  faceDescriptor?: number[];
+  faceDescriptor: number[];
   photoBase64: string;
   createdAt: Timestamp;
 }

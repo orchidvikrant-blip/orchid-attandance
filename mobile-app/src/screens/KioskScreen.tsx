@@ -3,9 +3,10 @@ import {
   Animated, Dimensions, Image, StatusBar, StyleSheet, Text, View,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import * as FaceDetector from 'expo-face-detector';
 import * as Speech from 'expo-speech';
 import {
-  initTensorFlow, isTfReady, recognizeWithLuxand, type ProgressFn, type LuxandMatch,
+  initFaceRecognition, isFaceReady, computeDescriptor, matchDescriptor, type ProgressFn,
 } from '../services/faceRecognition';
 import { getAllEmployees, getLastAttendanceType, markAttendance } from '../services/attendanceService';
 import type { Employee } from '../services/attendanceService';
@@ -13,11 +14,6 @@ import type { Employee } from '../services/attendanceService';
 const { width: W } = Dimensions.get('window');
 const CAM_W = W * 0.70;
 const CAM_H = W * 0.86;
-
-// Delay after no face recognised before next scan (ms)
-const IDLE_DELAY   = 800;
-// Delay after showing result before scanning again
-const RESULT_DELAY = 3200;
 
 const C = {
   bg:      '#071022',
@@ -37,29 +33,24 @@ export default function KioskScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
 
-  const [status,    setStatus]   = useState<Status>('idle');
-  const [employee,  setEmployee] = useState<Employee | null>(null);
-  const [attType,   setAttType]  = useState<'IN' | 'OUT'>('IN');
-  const [timeStr,   setTimeStr]  = useState('');
-  const [initMsg,   setInitMsg]  = useState('Initializing...');
-  const [debugMsg,  setDebugMsg] = useState('');
+  const [status,    setStatus]    = useState<Status>('idle');
+  const [employee,  setEmployee]  = useState<Employee | null>(null);
+  const [attType,   setAttType]   = useState<'IN' | 'OUT'>('IN');
+  const [timeStr,   setTimeStr]   = useState('');
+  const [initMsg,   setInitMsg]   = useState('Initializing...');
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [debugMsg,  setDebugMsg]  = useState('');
 
   const employeesRef = useRef<Employee[]>([]);
   const locked       = useRef(false);
   const isMounted    = useRef(true);
-  const scanRef      = useRef<(() => Promise<void>) | undefined>(undefined);
-  const [employees,  setEmployees] = useState<Employee[]>([]);
+  const cooldownRef  = useRef(0); // timestamp of last recognition attempt
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim  = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.85)).current;
 
   useEffect(() => { return () => { isMounted.current = false; }; }, []);
-
-  const scheduleNext = useCallback((delay: number) => {
-    if (!isMounted.current) return;
-    setTimeout(() => { if (isMounted.current) scanRef.current?.(); }, delay);
-  }, []);
 
   const showResult = useCallback((
     s: Status, emp?: Employee, type?: 'IN' | 'OUT', time?: string
@@ -84,46 +75,47 @@ export default function KioskScreen() {
         setEmployee(null);
         setTimeStr('');
         locked.current = false;
-        scheduleNext(IDLE_DELAY);
       });
     }, 3000);
-  }, [fadeAnim, scaleAnim, scheduleNext]);
+  }, [fadeAnim, scaleAnim]);
 
-  const scan = useCallback(async () => {
-    if (!cameraRef.current || locked.current || !isTfReady()) {
-      scheduleNext(500);
-      return;
-    }
+  // Called by CameraView whenever MLKit detects faces in the live frame
+  const handleFacesDetected = useCallback(async ({ faces }: { faces: FaceDetector.FaceDetection[] }) => {
+    if (!isFaceReady() || locked.current || !isMounted.current) return;
+    if (faces.length === 0) return;
+
+    // Cooldown: at least 4 seconds between recognition attempts
+    const now = Date.now();
+    if (now - cooldownRef.current < 4000) return;
+    cooldownRef.current = now;
+
     locked.current = true;
+    setStatus('scanning');
 
     try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.9, exif: false,
-      });
-      if (!photo?.uri) { locked.current = false; scheduleNext(IDLE_DELAY); return; }
+      const photo = await cameraRef.current?.takePictureAsync({ quality: 0.85, exif: false });
+      if (!photo?.uri) { locked.current = false; setStatus('idle'); return; }
 
-      setStatus('scanning');
+      const face  = faces[0];
+      const bounds = {
+        x:      face.bounds.origin.x,
+        y:      face.bounds.origin.y,
+        width:  face.bounds.size.width,
+        height: face.bounds.size.height,
+      };
 
-      const luxand = await Promise.race([
-        recognizeWithLuxand(photo.uri),
-        new Promise<null>(r => setTimeout(() => r(null), 15000)),
-      ]) as LuxandMatch | null;
+      setDebugMsg(`Face at (${Math.round(bounds.x)},${Math.round(bounds.y)}) ${Math.round(bounds.width)}x${Math.round(bounds.height)}`);
 
-      if (!luxand) {
-        setDebugMsg('No face / no match');
-        setStatus('idle');
+      const descriptor = await computeDescriptor(photo.uri, bounds);
+      if (!descriptor) {
+        setDebugMsg('Descriptor failed — retrying');
         locked.current = false;
-        scheduleNext(IDLE_DELAY);
+        setStatus('idle');
         return;
       }
 
-      setDebugMsg(`Luxand: ${luxand.name} (${luxand.uuid.slice(0,8)}) sim:${luxand.similarity}`);
-
-      // Match by luxandPersonId (UUID) or by name as fallback
-      const match =
-        employeesRef.current.find(e => e.luxandPersonId === luxand.uuid) ??
-        employeesRef.current.find(e => e.name.toLowerCase() === luxand.name.toLowerCase()) ??
-        null;
+      const match = matchDescriptor(descriptor, employeesRef.current);
+      setDebugMsg(match ? `Matched: ${match.employee.name} (${match.score}%)` : 'No match');
 
       if (!match) {
         Speech.speak('Please try again', { language: 'en-IN', rate: 0.9 });
@@ -131,51 +123,43 @@ export default function KioskScreen() {
         return;
       }
 
-      const lastType = await getLastAttendanceType(match.id);
+      const lastType = await getLastAttendanceType(match.employee.id);
       const nextType: 'IN' | 'OUT' = lastType === 'IN' ? 'OUT' : 'IN';
-      await markAttendance(match, nextType);
+      await markAttendance(match.employee, nextType);
       const t = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
       Speech.speak(
-        `Thank you ${match.name}, checked ${nextType === 'IN' ? 'in' : 'out'}`,
+        `Thank you ${match.employee.name}, checked ${nextType === 'IN' ? 'in' : 'out'}`,
         { language: 'en-IN', rate: 0.9 }
       );
-      showResult('marked', match, nextType, t);
+      showResult('marked', match.employee, nextType, t);
 
     } catch (e) {
-      console.error(e);
-      setStatus('idle');
+      console.error('Recognition error:', e);
       locked.current = false;
-      scheduleNext(IDLE_DELAY);
+      setStatus('idle');
     }
-  }, [scheduleNext, showResult]);
+  }, [showResult]);
 
-  useEffect(() => { scanRef.current = scan; });
-
-  const [serviceReady, setServiceReady] = useState(false);
+  const [tfReady, setTfReady] = useState(false);
 
   useEffect(() => {
     (async () => {
       await requestPermission();
-      const onProgress: ProgressFn = (msg) => setInitMsg(msg);
-      setInitMsg('Starting...');
+      const onProgress: ProgressFn = msg => setInitMsg(msg);
       try {
-        await initTensorFlow(onProgress);
+        await initFaceRecognition(onProgress);
       } catch (e: any) {
         setInitMsg('ERROR: ' + String(e?.message ?? e));
         return;
       }
-      setInitMsg('');
       const emps = await getAllEmployees();
       employeesRef.current = emps;
       setEmployees(emps);
-      setServiceReady(true);
+      setTfReady(true);
     })();
   }, []);
 
-  useEffect(() => {
-    if (serviceReady) scheduleNext(500);
-  }, [serviceReady, scheduleNext]);
-
+  // Pulse animation
   useEffect(() => {
     if (status === 'idle' || status === 'scanning') {
       Animated.loop(
@@ -211,19 +195,27 @@ export default function KioskScreen() {
     <View style={s.root}>
       <StatusBar hidden />
 
-      {/* Header */}
       <View style={s.header}>
         <Image source={require('../../assets/logo.png')} style={s.logo} resizeMode="contain" />
         <View style={s.headerDivider} />
         <Text style={s.headerDate}>{today}</Text>
       </View>
 
-      {/* Camera */}
       <View style={s.camWrap}>
         <Animated.View style={[s.camBorder, { borderColor, transform: [{ scale: pulseAnim }] }]}>
-          <CameraView ref={cameraRef} style={s.cam} facing="front" />
-
-          {/* Corner brackets */}
+          <CameraView
+            ref={cameraRef}
+            style={s.cam}
+            facing="front"
+            onFacesDetected={tfReady ? handleFacesDetected : undefined}
+            faceDetectorSettings={{
+              mode:               FaceDetector.FaceDetectorMode.fast,
+              detectLandmarks:    FaceDetector.FaceDetectorLandmarks.none,
+              runClassifications: FaceDetector.FaceDetectorClassifications.none,
+              minDetectionInterval: 500,
+              tracking: false,
+            }}
+          />
           {(['tl','tr','bl','br'] as const).map(p => (
             <View key={p} style={[s.corner, s[p], { borderColor }]} />
           ))}
@@ -237,7 +229,6 @@ export default function KioskScreen() {
         </View>
       </View>
 
-      {/* Status area */}
       <View style={s.statusWrap}>
         {initMsg ? (
           <Text style={{ color: C.gold, fontSize: 14 }}>{initMsg}</Text>
@@ -282,20 +273,18 @@ export default function KioskScreen() {
         )}
       </View>
 
-      {/* Debug bar */}
       {!!debugMsg && (
         <View style={{ backgroundColor: '#111', paddingHorizontal: 12, paddingVertical: 4 }}>
-          <Text style={{ color: '#facc15', fontSize: 10, fontFamily: 'monospace' }}>{debugMsg}</Text>
+          <Text style={{ color: '#facc15', fontSize: 10 }}>{debugMsg}</Text>
         </View>
       )}
 
-      {/* Footer */}
       <View style={s.footer}>
         <View style={s.footerDot} />
         <Text style={s.footerText}>
-          {serviceReady
-            ? `${employees.length} employees  •  Luxand Cloud  •  Active`
-            : 'Connecting...'}
+          {tfReady
+            ? `${employees.length} employees  •  On-Device AI  •  Active`
+            : 'Loading AI...'}
         </Text>
       </View>
     </View>
@@ -304,7 +293,6 @@ export default function KioskScreen() {
 
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg },
-
   header: {
     paddingTop: 36, paddingBottom: 14, alignItems: 'center',
     backgroundColor: C.card, borderBottomWidth: 1, borderBottomColor: C.border,
@@ -312,43 +300,30 @@ const s = StyleSheet.create({
   logo:          { width: W * 0.38, height: 52 },
   headerDivider: { width: 40, height: 2, backgroundColor: C.gold, marginTop: 10, borderRadius: 1 },
   headerDate:    { color: C.textSub, fontSize: 12, marginTop: 8, letterSpacing: 0.3 },
-
   camWrap:   { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  camBorder: {
-    width: CAM_W, height: CAM_H,
-    borderRadius: 20, borderWidth: 2.5, overflow: 'hidden',
-  },
-  cam: { flex: 1 },
-
-  corner: { position: 'absolute', width: 20, height: 20, borderWidth: 3 },
+  camBorder: { width: CAM_W, height: CAM_H, borderRadius: 20, borderWidth: 2.5, overflow: 'hidden' },
+  cam:       { flex: 1 },
+  corner:    { position: 'absolute', width: 20, height: 20, borderWidth: 3 },
   tl: { top: -1,    left: -1,  borderRightWidth: 0,  borderBottomWidth: 0, borderTopLeftRadius: 18 },
   tr: { top: -1,    right: -1, borderLeftWidth: 0,   borderBottomWidth: 0, borderTopRightRadius: 18 },
   bl: { bottom: -1, left: -1,  borderRightWidth: 0,  borderTopWidth: 0,    borderBottomLeftRadius: 18 },
   br: { bottom: -1, right: -1, borderLeftWidth: 0,   borderTopWidth: 0,    borderBottomRightRadius: 18 },
-
   smileWrap: { marginTop: 14, alignItems: 'center' },
   smileText: { color: C.gold, fontSize: 13, fontWeight: '500', letterSpacing: 0.3 },
   scanLabel: { backgroundColor: '#e8a82033', paddingHorizontal: 20, paddingVertical: 6, borderRadius: 20 },
   scanText:  { color: C.gold, fontSize: 14, fontWeight: '600' },
-
   statusWrap: { height: 150, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 },
   idleMain:   { color: '#c8d8f0', fontSize: 16, fontWeight: '500', textAlign: 'center' },
   idleSub:    { color: C.textSub, fontSize: 12, marginTop: 6 },
-
-  resultCard: {
-    width: '100%', borderRadius: 16, padding: 18, alignItems: 'center', borderWidth: 1,
-  },
+  resultCard: { width: '100%', borderRadius: 16, padding: 18, alignItems: 'center', borderWidth: 1 },
   thankYou:  { color: C.gold, fontSize: 20, fontWeight: '700', marginBottom: 6 },
   empName:   { color: C.white, fontSize: 22, fontWeight: '800' },
   empDept:   { color: C.textSub, fontSize: 13, marginTop: 2 },
-  typeBadge: {
-    marginTop: 12, paddingHorizontal: 28, paddingVertical: 7, borderRadius: 22, borderWidth: 1,
-  },
+  typeBadge: { marginTop: 12, paddingHorizontal: 28, paddingVertical: 7, borderRadius: 22, borderWidth: 1 },
   typeText:    { fontSize: 15, fontWeight: '800', letterSpacing: 1.5 },
   timeText:    { color: '#4a6fa5', fontSize: 12, marginTop: 10 },
   unknownText: { color: '#fca5a5', fontSize: 20, fontWeight: '700' },
   unknownSub:  { color: '#94a3b8', fontSize: 13, marginTop: 6 },
-
   footer: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     paddingVertical: 11, backgroundColor: C.card,

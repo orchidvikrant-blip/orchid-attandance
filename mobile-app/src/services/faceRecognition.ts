@@ -1,57 +1,116 @@
-const LUXAND_API   = 'https://api.luxand.cloud';
-const LUXAND_TOKEN = 'f0a8bfdc2d494fb4b60a072dd247908c';
+import * as tf from '@tensorflow/tfjs';
+import '@tensorflow/tfjs-react-native';
+import * as faceapi from '@vladmandic/face-api';
+import * as FileSystem from 'expo-file-system/legacy';
+import { Asset } from 'expo-asset';
+import { decode as decodeBase64 } from 'base64-arraybuffer';
+import * as ImageManipulator from 'expo-image-manipulator';
+import type { Employee } from './attendanceService';
+
+// Only the recognition model — detection is done by MLKit (expo-face-detector)
+const RECOG = {
+  manifest: require('../../assets/models/face_recognition_model-weights_manifest.json'),
+  shards: [
+    require('../../assets/models/face_recognition_model-shard1.bin'),
+    require('../../assets/models/face_recognition_model-shard2.bin'),
+  ],
+};
+
+async function assetToBuffer(module: number): Promise<ArrayBuffer> {
+  const asset = await Asset.fromModule(module).downloadAsync();
+  const b64 = await FileSystem.readAsStringAsync(asset.localUri!, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+  return decodeBase64(b64);
+}
 
 let ready = false;
 export type ProgressFn = (msg: string) => void;
 
-export async function initTensorFlow(onProgress?: ProgressFn): Promise<void> {
+export async function initFaceRecognition(onProgress?: ProgressFn): Promise<void> {
   if (ready) return;
-  onProgress?.('Connecting...');
+  onProgress?.('Initializing AI...');
+  await tf.ready();
+
+  onProgress?.('Loading recognition model...');
+  const weightSpecs: tf.io.WeightsManifestEntry[] =
+    (RECOG.manifest as any[]).flatMap((g: any) => g.weights);
+  const buffers = await Promise.all(RECOG.shards.map(assetToBuffer));
+  const totalBytes = buffers.reduce((s, b) => s + b.byteLength, 0);
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const buf of buffers) { combined.set(new Uint8Array(buf), offset); offset += buf.byteLength; }
+  const weightMap = tf.io.decodeWeights(combined.buffer, weightSpecs);
+  (faceapi.nets.faceRecognitionNet as any).loadFromWeightMap(weightMap);
+
   ready = true;
+  onProgress?.('');
 }
 
-export function isTfReady(): boolean { return ready; }
+export function isFaceReady(): boolean { return ready; }
 
-export interface LuxandMatch {
-  uuid: string;
-  name: string;
-  similarity: number;
-}
-
-// Sends photo file URI to Luxand using XHR (most reliable in React Native / Hermes)
-export function recognizeWithLuxand(photoUri: string): Promise<LuxandMatch | null> {
-  return new Promise(resolve => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${LUXAND_API}/photo/search?threshold=0.5`);
-    xhr.setRequestHeader('token', LUXAND_TOKEN);
-
-    const form = new FormData();
-    (form as any).append('photo', { uri: photoUri, type: 'image/jpeg', name: 'scan.jpg' });
-    (form as any).append('threshold', '0.6'); // more permissive matching
-
-    xhr.onreadystatechange = () => {
-      if (xhr.readyState !== 4) return;
-      console.log('Luxand status:', xhr.status, 'body:', xhr.responseText?.slice(0, 300));
-      try {
-        const data = JSON.parse(xhr.responseText);
-        // Luxand returns [] for no match, or [{uuid,name,similarity,...}] for match
-        const arr: any[] = Array.isArray(data) ? data
-          : Array.isArray(data.result) ? data.result
-          : [];
-        if (arr.length > 0) {
-          const r = arr[0];
-          resolve({ uuid: r.uuid ?? r.person_id ?? '', name: r.name ?? '', similarity: r.similarity ?? 0 });
-        } else {
-          resolve(null);
-        }
-      } catch {
-        resolve(null);
-      }
+// Crop detected face from photo → compute 128-dim descriptor
+export async function computeDescriptor(
+  photoUri: string,
+  bounds: { x: number; y: number; width: number; height: number }
+): Promise<Float32Array | null> {
+  try {
+    const pad = Math.min(bounds.width, bounds.height) * 0.25;
+    const crop = {
+      originX: Math.max(0, bounds.x - pad),
+      originY: Math.max(0, bounds.y - pad),
+      width:   bounds.width  + pad * 2,
+      height:  bounds.height + pad * 2,
     };
 
-    xhr.onerror = () => { console.warn('Luxand XHR network error'); resolve(null); };
-    xhr.ontimeout = () => { console.warn('Luxand XHR timeout'); resolve(null); };
-    xhr.timeout = 12000;
-    xhr.send(form);
-  });
+    const resized = await ImageManipulator.manipulateAsync(
+      photoUri,
+      [{ crop }, { resize: { width: 160, height: 160 } }],
+      { format: ImageManipulator.SaveFormat.JPEG, base64: true }
+    );
+    if (!resized.base64) return null;
+
+    const jpeg = require('jpeg-js');
+    const ab   = decodeBase64(resized.base64);
+    const raw  = jpeg.decode(new Uint8Array(ab), { useTArray: true });
+    const rgba = tf.tensor3d(raw.data, [raw.height, raw.width, 4], 'int32');
+    const rgb  = rgba.slice([0, 0, 0], [-1, -1, 3]).cast('float32');
+    rgba.dispose();
+
+    const result = await Promise.race([
+      (faceapi.nets.faceRecognitionNet as any).computeFaceDescriptor(rgb),
+      new Promise<null>(r => setTimeout(() => r(null), 8000)),
+    ]);
+    rgb.dispose();
+
+    return result as Float32Array | null;
+  } catch (e) {
+    console.warn('computeDescriptor error:', e);
+    return null;
+  }
+}
+
+const THRESHOLD = 0.55;
+
+export function matchDescriptor(
+  descriptor: Float32Array,
+  employees: Employee[]
+): { employee: Employee; score: number } | null {
+  let best: Employee | null = null;
+  let bestDist = Infinity;
+
+  for (const emp of employees) {
+    const fd = emp.faceDescriptor;
+    if (!fd?.length) continue;
+    let sum = 0;
+    for (let i = 0; i < Math.min(descriptor.length, fd.length); i++) {
+      sum += (descriptor[i] - fd[i]) ** 2;
+    }
+    const dist = Math.sqrt(sum);
+    if (dist < bestDist) { bestDist = dist; best = emp; }
+  }
+
+  return best && bestDist <= THRESHOLD
+    ? { employee: best, score: Math.round((1 - bestDist / THRESHOLD) * 100) }
+    : null;
 }

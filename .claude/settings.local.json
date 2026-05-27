@@ -8,7 +8,11 @@
       "Bash(git commit *)",
       "Bash(git branch *)",
       "Bash(git push *)",
-      "Bash(git remote *)"
+      "Bash(git remote *)",
+      "Bash(npm install *)",
+      "PowerShell(Get-ChildItem \"e:\\\\Development\\\\Orchid Attedence app\\\\mobile-app\\\\assets\\\\models\" | Select-Object Name, @{n='KB';e={[math]::Round\\($_.Length/1KB,1\\)}})",
+      "WebSearch",
+      "WebFetch(domain:luxand.cloud)"
     ]
   }
 }
