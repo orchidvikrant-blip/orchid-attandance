@@ -18,36 +18,36 @@ export interface LuxandMatch {
   similarity: number;
 }
 
-// Sends photo file URI to Luxand and returns matched person, or null
-export async function recognizeWithLuxand(photoUri: string): Promise<LuxandMatch | null> {
-  try {
-    // Fetch the local file URI as a Blob (avoids FormDataPart issues in RN 0.85)
-    const fileBlob = await fetch(photoUri).then(r => r.blob());
+// Sends photo file URI to Luxand using XHR (most reliable in React Native / Hermes)
+export function recognizeWithLuxand(photoUri: string): Promise<LuxandMatch | null> {
+  return new Promise(resolve => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${LUXAND_API}/photo/search`);
+    xhr.setRequestHeader('token', LUXAND_TOKEN);
 
     const form = new FormData();
-    form.append('photo', fileBlob, 'scan.jpg');
+    // XHR handles {uri,type,name} natively in Android — no Blob needed
+    (form as any).append('photo', { uri: photoUri, type: 'image/jpeg', name: 'scan.jpg' });
 
-    const res = await fetch(`${LUXAND_API}/photo/search`, {
-      method: 'POST',
-      headers: { token: LUXAND_TOKEN },
-      body: form,
-    });
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState !== 4) return;
+      console.log('Luxand status:', xhr.status, 'body:', xhr.responseText?.slice(0, 200));
+      try {
+        const data = JSON.parse(xhr.responseText);
+        if (data.status === 'success' && Array.isArray(data.result) && data.result.length > 0) {
+          const r = data.result[0];
+          resolve({ uuid: r.uuid ?? r.person_id ?? '', name: r.name ?? '', similarity: r.similarity ?? 0 });
+        } else {
+          resolve(null);
+        }
+      } catch {
+        resolve(null);
+      }
+    };
 
-    const text = await res.text();
-    console.log('Luxand HTTP status:', res.status);
-    console.log('Luxand raw response:', text);
-
-    if (!res.ok) return null;
-
-    const data = JSON.parse(text);
-    if (data.status === 'success' && Array.isArray(data.result) && data.result.length > 0) {
-      const r = data.result[0];
-      return { uuid: r.uuid ?? r.person_id ?? '', name: r.name ?? '', similarity: r.similarity ?? 0 };
-    }
-    // Return debug info when no match
-    return null;
-  } catch (e) {
-    console.warn('Luxand search error:', e);
-    return null;
-  }
+    xhr.onerror = () => { console.warn('Luxand XHR network error'); resolve(null); };
+    xhr.ontimeout = () => { console.warn('Luxand XHR timeout'); resolve(null); };
+    xhr.timeout = 12000;
+    xhr.send(form);
+  });
 }
