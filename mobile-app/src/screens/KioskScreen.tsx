@@ -97,14 +97,14 @@ export default function KioskScreen() {
 
     try {
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.5, base64: true, exif: false,
+        quality: 0.5, exif: false,
       });
-      if (!photo?.base64) { locked.current = false; scheduleNext(IDLE_DELAY); return; }
+      if (!photo?.uri) { locked.current = false; scheduleNext(IDLE_DELAY); return; }
 
       setStatus('scanning');
 
       const uuid = await Promise.race([
-        recognizeWithLuxand(photo.base64),
+        recognizeWithLuxand(photo.uri),
         new Promise<null>(r => setTimeout(() => r(null), 15000)),
       ]);
 
