@@ -1,7 +1,7 @@
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-react-native';
 import * as faceapi from '@vladmandic/face-api';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { Asset } from 'expo-asset';
 import { decode as decodeBase64 } from 'base64-arraybuffer';
 import type { Employee } from './attendanceService';
@@ -35,14 +35,14 @@ async function assetToBuffer(module: number): Promise<ArrayBuffer> {
 }
 
 // Load a face-api.js network from bundled assets using tf.io
-async function loadNet(net: any, manifestObj: any, shardModules: number[]) {
-  // manifest is already parsed JSON (required directly)
+async function loadNet(net: any, manifestObj: any, shardModules: number[], onProgress?: ProgressFn, label?: string) {
+  onProgress?.(`${label}: reading files...`);
   const weightSpecs: tf.io.WeightsManifestEntry[] =
     (manifestObj as any[]).flatMap((g: any) => g.weights);
 
   const buffers = await Promise.all(shardModules.map(assetToBuffer));
 
-  // Concatenate all shard buffers
+  onProgress?.(`${label}: decoding weights...`);
   const totalBytes = buffers.reduce((s, b) => s + b.byteLength, 0);
   const combined   = new Uint8Array(totalBytes);
   let offset = 0;
@@ -52,7 +52,8 @@ async function loadNet(net: any, manifestObj: any, shardModules: number[]) {
   }
 
   const weightMap = tf.io.decodeWeights(combined.buffer, weightSpecs);
-  await net.load(weightMap);
+  onProgress?.(`${label}: loading params...`);
+  (net as any).loadFromWeightMap(weightMap);
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -64,14 +65,9 @@ export async function initTensorFlow(onProgress?: ProgressFn): Promise<void> {
   if (ready) return;
   await tf.ready();
 
-  onProgress?.('Loading face detector...');
-  await loadNet(faceapi.nets.tinyFaceDetector, ASSETS.tinyFace.manifest, ASSETS.tinyFace.shards);
-
-  onProgress?.('Loading landmark model...');
-  await loadNet(faceapi.nets.faceLandmark68TinyNet, ASSETS.landmark.manifest, ASSETS.landmark.shards);
-
-  onProgress?.('Loading recognition model...');
-  await loadNet(faceapi.nets.faceRecognitionNet, ASSETS.recognition.manifest, ASSETS.recognition.shards);
+  await loadNet(faceapi.nets.tinyFaceDetector, ASSETS.tinyFace.manifest, ASSETS.tinyFace.shards, onProgress, 'Detector');
+  await loadNet(faceapi.nets.faceLandmark68TinyNet, ASSETS.landmark.manifest, ASSETS.landmark.shards, onProgress, 'Landmark');
+  await loadNet(faceapi.nets.faceRecognitionNet, ASSETS.recognition.manifest, ASSETS.recognition.shards, onProgress, 'Recognition');
 
   ready = true;
 }
@@ -85,7 +81,7 @@ export async function base64ToTensor(base64: string): Promise<tf.Tensor3D | null
     const ab   = decodeBase64(base64);
     const raw  = jpeg.decode(new Uint8Array(ab), { useTArray: true });
     const rgba = tf.tensor3d(raw.data, [raw.height, raw.width, 4], 'int32');
-    const rgb  = rgba.slice([0, 0, 0], [-1, -1, 3]).cast('int32');
+    const rgb  = rgba.slice([0, 0, 0], [-1, -1, 3]).cast('float32');
     rgba.dispose();
     return rgb as tf.Tensor3D;
   } catch (e) {

@@ -51,7 +51,7 @@ export default function KioskScreen() {
   const employeesRef  = useRef<Employee[]>([]);
   const locked        = useRef(false);
   const isMounted     = useRef(true);
-  const scanRef       = useRef<() => Promise<void>>();
+  const scanRef       = useRef<(() => Promise<void>) | undefined>(undefined);
   const [employees,   setEmployees] = useState<Employee[]>([]);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -113,7 +113,10 @@ export default function KioskScreen() {
       const tensor = await base64ToTensor(photo.base64);
       if (!tensor) { locked.current = false; scheduleNext(IDLE_DELAY); return; }
 
-      const detection = await detectFace(tensor);
+      const detection = await Promise.race([
+        detectFace(tensor),
+        new Promise<null>(r => setTimeout(() => r(null), 10000)),
+      ]);
       tensor.dispose();
 
       if (!detection) {
@@ -169,7 +172,12 @@ export default function KioskScreen() {
       await requestPermission();
       const onProgress: ProgressFn = (msg) => setInitMsg(msg);
       setInitMsg('Starting...');
-      await initTensorFlow(onProgress);
+      try {
+        await initTensorFlow(onProgress);
+      } catch (e: any) {
+        setInitMsg('ERROR: ' + String(e?.message ?? e));
+        return;
+      }
       setInitMsg('');
       const emps = await getAllEmployees();
       employeesRef.current = emps;
