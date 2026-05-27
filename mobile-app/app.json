@@ -34,7 +34,7 @@
         }
       ]
     ],
-    "assetBundlePatterns": ["assets/**/*"],
+    "assetBundlePatterns": ["assets/*.png", "assets/*.jpg"],
     "web": {
       "favicon": "./assets/favicon.png"
     },

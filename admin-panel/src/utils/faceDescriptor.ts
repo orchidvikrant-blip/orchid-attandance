@@ -1,39 +1,44 @@
-import * as faceapi from '@vladmandic/face-api';
+const LUXAND_API   = 'https://api.luxand.cloud';
+const LUXAND_TOKEN = 'f0a8bfdc2d494fb4b60a072dd247908c';
 
-const MODEL_URL =
-  'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
+// Register a person's face with Luxand and return their UUID.
+// photoDataUrl — data:image/jpeg;base64,... from canvas
+export async function registerFaceWithLuxand(name: string, photoDataUrl: string): Promise<string> {
+  // 1. Create person
+  const createRes = await fetch(`${LUXAND_API}/person`, {
+    method: 'POST',
+    headers: { token: LUXAND_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!createRes.ok) {
+    const txt = await createRes.text();
+    throw new Error(`Luxand create person failed: ${createRes.status} ${txt}`);
+  }
+  const { uuid } = await createRes.json() as { uuid: string };
 
-let modelsLoaded = false;
+  // 2. Upload photo (strip data: prefix)
+  const base64 = photoDataUrl.includes(',') ? photoDataUrl.split(',')[1] : photoDataUrl;
+  const photoRes = await fetch(`${LUXAND_API}/person/${uuid}/photo`, {
+    method: 'POST',
+    headers: { token: LUXAND_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo: base64 }),
+  });
+  if (!photoRes.ok) {
+    // Clean up orphan person
+    await fetch(`${LUXAND_API}/person/${uuid}`, {
+      method: 'DELETE',
+      headers: { token: LUXAND_TOKEN },
+    }).catch(() => undefined);
+    const txt = await photoRes.text();
+    throw new Error(`Luxand photo upload failed: ${photoRes.status} ${txt}`);
+  }
 
-async function ensureModels() {
-  if (modelsLoaded) return;
-  await Promise.all([
-    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-    faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL),
-    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-  ]);
-  modelsLoaded = true;
+  return uuid;
 }
 
-export async function computeFaceDescriptor(dataUrl: string): Promise<number[]> {
-  await ensureModels();
-
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = async () => {
-      try {
-        const det = await faceapi
-          .detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.5 }))
-          .withFaceLandmarks(true)
-          .withFaceDescriptor();
-
-        if (!det) { resolve([]); return; }
-        resolve(Array.from(det.descriptor));
-      } catch (e) {
-        reject(e);
-      }
-    };
-    img.onerror = reject;
-    img.src = dataUrl;
-  });
+export async function deleteFaceFromLuxand(uuid: string): Promise<void> {
+  await fetch(`${LUXAND_API}/person/${uuid}`, {
+    method: 'DELETE',
+    headers: { token: LUXAND_TOKEN },
+  }).catch(() => undefined);
 }

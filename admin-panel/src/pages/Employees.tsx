@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { getAllEmployees, addEmployee, deleteEmployee } from '../services/employeeService';
 import type { Employee } from '../services/employeeService';
 import toast from 'react-hot-toast';
-import { computeFaceDescriptor } from '../utils/faceDescriptor';
+import { registerFaceWithLuxand, deleteFaceFromLuxand } from '../utils/faceDescriptor';
 
 const DEPARTMENTS = ['HR', 'IT', 'Finance', 'Operations', 'Sales', 'Admin', 'Management'];
 
@@ -91,35 +91,30 @@ export default function Employees() {
     if (!photoBase64) { toast.error('Photo required'); return; }
     setSaving(true);
     try {
-      const loadingId = 'face-desc';
-      toast.loading('Detecting face & computing descriptor...', { id: loadingId });
-      const descriptor = await computeFaceDescriptor(photoPreview);
+      const loadingId = 'luxand-reg';
+      toast.loading('Registering face with Luxand...', { id: loadingId });
+      const luxandPersonId = await registerFaceWithLuxand(form.name, photoPreview);
       toast.dismiss(loadingId);
 
-      if (descriptor.length === 0) {
-        toast.error('No face detected. Use a clear front-facing photo.');
-        setSaving(false);
-        return;
-      }
-
       await addEmployee(
-        { ...form, faceDescriptor: descriptor },
+        { ...form, luxandPersonId },
         photoBase64
       );
-      toast.success(`${form.name} registered! Face descriptor saved (${descriptor.length} values).`);
+      toast.success(`${form.name} registered! Face ID: ${luxandPersonId.slice(0, 8)}...`);
       setShowForm(false);
       setForm(emptyForm);
       setPhotoBase64('');
       setPhotoPreview('');
       await load();
-    } catch (err) {
-      toast.error('Error saving employee');
+    } catch (err: any) {
+      toast.error('Registration failed: ' + (err?.message ?? 'Unknown error'));
     }
     setSaving(false);
   };
 
   const handleDelete = async (emp: Employee) => {
     if (!confirm(`Delete ${emp.name}?`)) return;
+    if (emp.luxandPersonId) await deleteFaceFromLuxand(emp.luxandPersonId);
     await deleteEmployee(emp.id);
     toast.success('Employee deleted');
     await load();

@@ -11,8 +11,9 @@ export interface Employee {
   department: string;
   email: string;
   phone: string;
-  faceDescriptor: number[];
-  photoBase64: string; // stored directly in Firestore (free, no Storage needed)
+  luxandPersonId?: string;
+  faceDescriptor?: number[];
+  photoBase64: string;
   createdAt: Timestamp;
 }
 
@@ -37,6 +38,7 @@ export async function addEmployee(
   const docRef = await addDoc(collection(db, 'employees'), {
     ...data,
     photoBase64,
+    faceDescriptor: [],
     createdAt: Timestamp.now(),
   });
   return docRef.id;

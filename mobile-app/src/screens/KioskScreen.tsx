@@ -5,8 +5,7 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Speech from 'expo-speech';
 import {
-  base64ToTensor, detectFace, initTensorFlow, isTfReady, matchDescriptor,
-  type ProgressFn,
+  initTensorFlow, isTfReady, recognizeWithLuxand, type ProgressFn,
 } from '../services/faceRecognition';
 import { getAllEmployees, getLastAttendanceType, markAttendance } from '../services/attendanceService';
 import type { Employee } from '../services/attendanceService';
@@ -15,10 +14,10 @@ const { width: W } = Dimensions.get('window');
 const CAM_W = W * 0.70;
 const CAM_H = W * 0.86;
 
-// Delay after no face detected before next scan (ms)
-const IDLE_DELAY    = 300;
+// Delay after no face recognised before next scan (ms)
+const IDLE_DELAY   = 800;
 // Delay after showing result before scanning again
-const RESULT_DELAY  = 3200;
+const RESULT_DELAY = 3200;
 
 const C = {
   bg:      '#071022',
@@ -34,25 +33,21 @@ const C = {
 
 type Status = 'idle' | 'scanning' | 'marked' | 'unknown';
 
-interface EyePos { left:[number,number]; right:[number,number]; imgW:number; imgH:number; }
-
 export default function KioskScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
 
-  const [status,    setStatus]    = useState<Status>('idle');
-  const [employee,  setEmployee]  = useState<Employee | null>(null);
-  const [attType,   setAttType]   = useState<'IN' | 'OUT'>('IN');
-  const [timeStr,   setTimeStr]   = useState('');
-  const [initMsg,   setInitMsg]   = useState('Initializing...');
-  const [eyePos,    setEyePos]    = useState<EyePos | null>(null);
+  const [status,   setStatus]   = useState<Status>('idle');
+  const [employee, setEmployee] = useState<Employee | null>(null);
+  const [attType,  setAttType]  = useState<'IN' | 'OUT'>('IN');
+  const [timeStr,  setTimeStr]  = useState('');
+  const [initMsg,  setInitMsg]  = useState('Initializing...');
 
-  // Refs — latest values without causing scan to restart
-  const employeesRef  = useRef<Employee[]>([]);
-  const locked        = useRef(false);
-  const isMounted     = useRef(true);
-  const scanRef       = useRef<(() => Promise<void>) | undefined>(undefined);
-  const [employees,   setEmployees] = useState<Employee[]>([]);
+  const employeesRef = useRef<Employee[]>([]);
+  const locked       = useRef(false);
+  const isMounted    = useRef(true);
+  const scanRef      = useRef<(() => Promise<void>) | undefined>(undefined);
+  const [employees,  setEmployees] = useState<Employee[]>([]);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim  = useRef(new Animated.Value(0)).current;
@@ -60,18 +55,15 @@ export default function KioskScreen() {
 
   useEffect(() => { return () => { isMounted.current = false; }; }, []);
 
-  // ─── Schedule next scan ──────────────────────────────────────────────────
   const scheduleNext = useCallback((delay: number) => {
     if (!isMounted.current) return;
     setTimeout(() => { if (isMounted.current) scanRef.current?.(); }, delay);
   }, []);
 
-  // ─── Show result card (match or unknown) ─────────────────────────────────
   const showResult = useCallback((
     s: Status, emp?: Employee, type?: 'IN' | 'OUT', time?: string
   ) => {
     setStatus(s);
-    setEyePos(null);
     if (emp)  setEmployee(emp);
     if (type) setAttType(type);
     if (time) setTimeStr(time);
@@ -91,12 +83,11 @@ export default function KioskScreen() {
         setEmployee(null);
         setTimeStr('');
         locked.current = false;
-        scheduleNext(IDLE_DELAY); // resume scanning
+        scheduleNext(IDLE_DELAY);
       });
     }, 3000);
   }, [fadeAnim, scaleAnim, scheduleNext]);
 
-  // ─── Main scan function ──────────────────────────────────────────────────
   const scan = useCallback(async () => {
     if (!cameraRef.current || locked.current || !isTfReady()) {
       scheduleNext(500);
@@ -106,36 +97,27 @@ export default function KioskScreen() {
 
     try {
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.4, base64: true, exif: false,
+        quality: 0.5, base64: true, exif: false,
       });
       if (!photo?.base64) { locked.current = false; scheduleNext(IDLE_DELAY); return; }
 
-      const tensor = await base64ToTensor(photo.base64);
-      if (!tensor) { locked.current = false; scheduleNext(IDLE_DELAY); return; }
+      setStatus('scanning');
 
-      const detection = await Promise.race([
-        detectFace(tensor),
-        new Promise<null>(r => setTimeout(() => r(null), 10000)),
+      const uuid = await Promise.race([
+        recognizeWithLuxand(photo.base64),
+        new Promise<null>(r => setTimeout(() => r(null), 15000)),
       ]);
-      tensor.dispose();
 
-      if (!detection) {
-        // No human face — stay completely silent, scan again soon
+      if (!uuid) {
+        // No face or no match — stay silent and keep scanning
+        setStatus('idle');
         locked.current = false;
         scheduleNext(IDLE_DELAY);
         return;
       }
 
-      // ✅ Face detected — show eye dots + scanning indicator
-      setStatus('scanning');
-      setEyePos({
-        left:  detection.leftEye,
-        right: detection.rightEye,
-        imgW:  photo.width  ?? 640,
-        imgH:  photo.height ?? 480,
-      });
-
-      const match = matchDescriptor(detection.descriptor, employeesRef.current);
+      // Find employee by luxandPersonId
+      const match = employeesRef.current.find(e => e.luxandPersonId === uuid) ?? null;
 
       if (!match) {
         Speech.speak('Please try again', { language: 'en-IN', rate: 0.9 });
@@ -143,29 +125,27 @@ export default function KioskScreen() {
         return;
       }
 
-      // ✅ Employee matched
-      const lastType = await getLastAttendanceType(match.employee.id);
+      const lastType = await getLastAttendanceType(match.id);
       const nextType: 'IN' | 'OUT' = lastType === 'IN' ? 'OUT' : 'IN';
-      await markAttendance(match.employee, nextType);
+      await markAttendance(match, nextType);
       const t = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
       Speech.speak(
-        `Thank you ${match.employee.name}, checked ${nextType === 'IN' ? 'in' : 'out'}`,
+        `Thank you ${match.name}, checked ${nextType === 'IN' ? 'in' : 'out'}`,
         { language: 'en-IN', rate: 0.9 }
       );
-      showResult('marked', match.employee, nextType, t);
+      showResult('marked', match, nextType, t);
 
     } catch (e) {
       console.error(e);
+      setStatus('idle');
       locked.current = false;
       scheduleNext(IDLE_DELAY);
     }
   }, [scheduleNext, showResult]);
 
-  // Keep scanRef current so scheduleNext always calls latest scan
   useEffect(() => { scanRef.current = scan; });
 
-  // ─── Initialization ──────────────────────────────────────────────────────
-  const [tfReady, setTfReady] = useState(false);
+  const [serviceReady, setServiceReady] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -182,16 +162,14 @@ export default function KioskScreen() {
       const emps = await getAllEmployees();
       employeesRef.current = emps;
       setEmployees(emps);
-      setTfReady(true);
+      setServiceReady(true);
     })();
   }, []);
 
-  // Start scan loop once TF is ready
   useEffect(() => {
-    if (tfReady) scheduleNext(500);
-  }, [tfReady, scheduleNext]);
+    if (serviceReady) scheduleNext(500);
+  }, [serviceReady, scheduleNext]);
 
-  // Pulse border when idle/scanning
   useEffect(() => {
     if (status === 'idle' || status === 'scanning') {
       Animated.loop(
@@ -239,21 +217,12 @@ export default function KioskScreen() {
         <Animated.View style={[s.camBorder, { borderColor, transform: [{ scale: pulseAnim }] }]}>
           <CameraView ref={cameraRef} style={s.cam} facing="front" />
 
-          {/* Eye dots — green circles on detected eyes */}
-          {eyePos && (['left', 'right'] as const).map(side => {
-            const [ex, ey] = eyePos[side];
-            const dx = CAM_W - (ex / eyePos.imgW * CAM_W); // mirror for front cam
-            const dy = ey / eyePos.imgH * CAM_H;
-            return <View key={side} style={[s.eyeDot, { left: dx - 6, top: dy - 6 }]} />;
-          })}
-
           {/* Corner brackets */}
           {(['tl','tr','bl','br'] as const).map(p => (
             <View key={p} style={[s.corner, s[p], { borderColor }]} />
           ))}
         </Animated.View>
 
-        {/* Below camera text */}
         <View style={s.smileWrap}>
           {status === 'scanning'
             ? <View style={s.scanLabel}><Text style={s.scanText}>⏳  Recognizing...</Text></View>
@@ -311,9 +280,9 @@ export default function KioskScreen() {
       <View style={s.footer}>
         <View style={s.footerDot} />
         <Text style={s.footerText}>
-          {tfReady
-            ? `${employees.length} employees  •  face-api.js  •  Active`
-            : 'Loading AI models...'}
+          {serviceReady
+            ? `${employees.length} employees  •  Luxand Cloud  •  Active`
+            : 'Connecting...'}
         </Text>
       </View>
     </View>
@@ -337,11 +306,6 @@ const s = StyleSheet.create({
     borderRadius: 20, borderWidth: 2.5, overflow: 'hidden',
   },
   cam: { flex: 1 },
-
-  eyeDot: {
-    position: 'absolute', width: 12, height: 12, borderRadius: 6,
-    backgroundColor: '#00ff88', borderWidth: 2, borderColor: '#fff', opacity: 0.9,
-  },
 
   corner: { position: 'absolute', width: 20, height: 20, borderWidth: 3 },
   tl: { top: -1,    left: -1,  borderRightWidth: 0,  borderBottomWidth: 0, borderTopLeftRadius: 18 },
