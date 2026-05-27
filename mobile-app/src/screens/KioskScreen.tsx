@@ -98,7 +98,7 @@ export default function KioskScreen() {
 
     try {
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.5, exif: false,
+        quality: 0.9, exif: false,
       });
       if (!photo?.uri) { locked.current = false; scheduleNext(IDLE_DELAY); return; }
 

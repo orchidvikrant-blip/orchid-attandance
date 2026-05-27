@@ -22,7 +22,7 @@ export interface LuxandMatch {
 export function recognizeWithLuxand(photoUri: string): Promise<LuxandMatch | null> {
   return new Promise(resolve => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${LUXAND_API}/photo/search`);
+    xhr.open('POST', `${LUXAND_API}/photo/search?threshold=0.5`);
     xhr.setRequestHeader('token', LUXAND_TOKEN);
 
     const form = new FormData();
