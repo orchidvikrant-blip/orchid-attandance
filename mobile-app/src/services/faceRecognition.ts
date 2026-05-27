@@ -12,12 +12,20 @@ export async function initTensorFlow(onProgress?: ProgressFn): Promise<void> {
 
 export function isTfReady(): boolean { return ready; }
 
-// Sends photo file URI to Luxand and returns matched person UUID, or null
-export async function recognizeWithLuxand(photoUri: string): Promise<string | null> {
+export interface LuxandMatch {
+  uuid: string;
+  name: string;
+  similarity: number;
+}
+
+// Sends photo file URI to Luxand and returns matched person, or null
+export async function recognizeWithLuxand(photoUri: string): Promise<LuxandMatch | null> {
   try {
+    // Fetch the local file URI as a Blob (avoids FormDataPart issues in RN 0.85)
+    const fileBlob = await fetch(photoUri).then(r => r.blob());
+
     const form = new FormData();
-    // React Native file upload — URI approach, no atob needed
-    form.append('photo', { uri: photoUri, name: 'scan.jpg', type: 'image/jpeg' } as any);
+    form.append('photo', fileBlob, 'scan.jpg');
 
     const res = await fetch(`${LUXAND_API}/photo/search`, {
       method: 'POST',
@@ -25,17 +33,18 @@ export async function recognizeWithLuxand(photoUri: string): Promise<string | nu
       body: form,
     });
 
-    if (!res.ok) {
-      console.warn('Luxand search HTTP error:', res.status, await res.text());
-      return null;
-    }
+    const text = await res.text();
+    console.log('Luxand HTTP status:', res.status);
+    console.log('Luxand raw response:', text);
 
-    const data = await res.json();
-    console.log('Luxand result:', JSON.stringify(data));
+    if (!res.ok) return null;
 
+    const data = JSON.parse(text);
     if (data.status === 'success' && Array.isArray(data.result) && data.result.length > 0) {
-      return data.result[0].uuid as string;
+      const r = data.result[0];
+      return { uuid: r.uuid ?? r.person_id ?? '', name: r.name ?? '', similarity: r.similarity ?? 0 };
     }
+    // Return debug info when no match
     return null;
   } catch (e) {
     console.warn('Luxand search error:', e);

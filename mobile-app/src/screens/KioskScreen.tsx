@@ -5,7 +5,7 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Speech from 'expo-speech';
 import {
-  initTensorFlow, isTfReady, recognizeWithLuxand, type ProgressFn,
+  initTensorFlow, isTfReady, recognizeWithLuxand, type ProgressFn, type LuxandMatch,
 } from '../services/faceRecognition';
 import { getAllEmployees, getLastAttendanceType, markAttendance } from '../services/attendanceService';
 import type { Employee } from '../services/attendanceService';
@@ -37,11 +37,12 @@ export default function KioskScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
 
-  const [status,   setStatus]   = useState<Status>('idle');
-  const [employee, setEmployee] = useState<Employee | null>(null);
-  const [attType,  setAttType]  = useState<'IN' | 'OUT'>('IN');
-  const [timeStr,  setTimeStr]  = useState('');
-  const [initMsg,  setInitMsg]  = useState('Initializing...');
+  const [status,    setStatus]   = useState<Status>('idle');
+  const [employee,  setEmployee] = useState<Employee | null>(null);
+  const [attType,   setAttType]  = useState<'IN' | 'OUT'>('IN');
+  const [timeStr,   setTimeStr]  = useState('');
+  const [initMsg,   setInitMsg]  = useState('Initializing...');
+  const [debugMsg,  setDebugMsg] = useState('');
 
   const employeesRef = useRef<Employee[]>([]);
   const locked       = useRef(false);
@@ -103,21 +104,26 @@ export default function KioskScreen() {
 
       setStatus('scanning');
 
-      const uuid = await Promise.race([
+      const luxand = await Promise.race([
         recognizeWithLuxand(photo.uri),
         new Promise<null>(r => setTimeout(() => r(null), 15000)),
-      ]);
+      ]) as LuxandMatch | null;
 
-      if (!uuid) {
-        // No face or no match — stay silent and keep scanning
+      if (!luxand) {
+        setDebugMsg('No face / no match');
         setStatus('idle');
         locked.current = false;
         scheduleNext(IDLE_DELAY);
         return;
       }
 
-      // Find employee by luxandPersonId
-      const match = employeesRef.current.find(e => e.luxandPersonId === uuid) ?? null;
+      setDebugMsg(`Luxand: ${luxand.name} (${luxand.uuid.slice(0,8)}) sim:${luxand.similarity}`);
+
+      // Match by luxandPersonId (UUID) or by name as fallback
+      const match =
+        employeesRef.current.find(e => e.luxandPersonId === luxand.uuid) ??
+        employeesRef.current.find(e => e.name.toLowerCase() === luxand.name.toLowerCase()) ??
+        null;
 
       if (!match) {
         Speech.speak('Please try again', { language: 'en-IN', rate: 0.9 });
@@ -275,6 +281,13 @@ export default function KioskScreen() {
           </Animated.View>
         )}
       </View>
+
+      {/* Debug bar */}
+      {!!debugMsg && (
+        <View style={{ backgroundColor: '#111', paddingHorizontal: 12, paddingVertical: 4 }}>
+          <Text style={{ color: '#facc15', fontSize: 10, fontFamily: 'monospace' }}>{debugMsg}</Text>
+        </View>
+      )}
 
       {/* Footer */}
       <View style={s.footer}>
