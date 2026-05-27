@@ -26,16 +26,20 @@ export function recognizeWithLuxand(photoUri: string): Promise<LuxandMatch | nul
     xhr.setRequestHeader('token', LUXAND_TOKEN);
 
     const form = new FormData();
-    // XHR handles {uri,type,name} natively in Android — no Blob needed
     (form as any).append('photo', { uri: photoUri, type: 'image/jpeg', name: 'scan.jpg' });
+    (form as any).append('threshold', '0.6'); // more permissive matching
 
     xhr.onreadystatechange = () => {
       if (xhr.readyState !== 4) return;
-      console.log('Luxand status:', xhr.status, 'body:', xhr.responseText?.slice(0, 200));
+      console.log('Luxand status:', xhr.status, 'body:', xhr.responseText?.slice(0, 300));
       try {
         const data = JSON.parse(xhr.responseText);
-        if (data.status === 'success' && Array.isArray(data.result) && data.result.length > 0) {
-          const r = data.result[0];
+        // Luxand returns [] for no match, or [{uuid,name,similarity,...}] for match
+        const arr: any[] = Array.isArray(data) ? data
+          : Array.isArray(data.result) ? data.result
+          : [];
+        if (arr.length > 0) {
+          const r = arr[0];
           resolve({ uuid: r.uuid ?? r.person_id ?? '', name: r.name ?? '', similarity: r.similarity ?? 0 });
         } else {
           resolve(null);
